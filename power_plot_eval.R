@@ -85,13 +85,81 @@ plot_values(
 
 total_power_usage <- read_csv("Verbrauch/Verbrauch_Gesamt_Giesserei_2025.csv")
 
-total_power_usage$Timestamp <- as.POSIXct(total_power_usage$Timestamp,
-                                   format = "%Y-%m-%dT%H:%M:%S",
-                                   tz = "Europe/Zurich"
+total_power_usage <- total_power_usage |> 
+  select(
+    -StartDateTime,
+    -EndDateTime,
+    -Resolution,
+    -Unit,
+    -MeterID,
+    -SourceFile,
+    -Date
+    )
+
+
+total_power_usage_daily <- aggregate_values(
+  data = total_power_usage,
+  time_col = "Timestamp",
+  value_col = "Volume",
+  period = "daily",
+)
+
+total_power_usage_weekly <- aggregate_values(
+  data = total_power_usage,
+  time_col = "Timestamp",
+  value_col = "Volume",
+  period = "weekly",
+)
+
+total_power_usage_monthly <- aggregate_values(
+  data = total_power_usage,
+  time_col = "Timestamp",
+  value_col = "Volume",
+  period = "monthly",
+)
+
+total_power_usage_yearly <- aggregate_values(
+  data = total_power_usage,
+  time_col = "Timestamp",
+  value_col = "Volume",
+  period = "yearly",
+  # source_name = "Solar production"
+)
+
+total_power_usage_total <- total_value(
+  data = total_power_usage,
+  value_col = "Volume"
+)
+
+plot_values(
+  total_power_usage_daily,
+  title = "Daily Usage",
+  y_label = "Volume",
+  plot_type = "bar"
+)
+
+plot_values(
+  total_power_usage_weekly,
+  title = "Weekly Usage",
+  y_label = "Volume",
+  plot_type = "bar"
+)
+
+plot_values(
+  total_power_usage_monthly,
+  title = "Monthly Usage",
+  y_label = "Volume",
+  plot_type = "bar"
 )
 
 
+## Alternative production
 
-
-
+alt_solar_total <- read_excel(
+  "PV_Production_alternative.xlsx",
+  sheet = "Total"
+  ) |> 
+  slice(-n()) |> 
+  mutate(Production = Production * 0.75) |> 
+  select(-Value)
 
