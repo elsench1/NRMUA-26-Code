@@ -4,79 +4,94 @@ library(lubridate)
 library(ggplot2)
 library(readr)
 
+source("functions.R")
 
 ## Solar Production Data
 
-prdouction_data <- read_excel("PV_MGH_Winterthur_15min-Werte_2025.xlsx",
-                   col_names = FALSE,
-                   skip = 1)
+production_data <- read_excel(
+  path = "PV_MGH_Winterthur_15min-Werte_2025.xlsx",
+  col_names = FALSE,
+  skip = 1
+)
 
-names(prdouction_data) <- c("Time", "Production [kWh]")
+names(production_data) <- c("Time", "Production [kWh]")
 
-prdouction_data$Time <- as.POSIXct(prdouction_data$Time,
-                        format = "%Y-%m-%dT%H:%M:%S",
-                        tz = "Europe/Zurich"
-                        )
+production_data$Time <- as.POSIXct(
+  production_data$Time,
+  format = "%Y-%m-%dT%H:%M:%S",
+  tz = "Europe/Zurich"
+)
 
-# prdouction_data$`Production [kWh]`[is.na(prdouction_data$`Production [kWh]`)] <- 0
 
-total_production <- sum(prdouction_data$`Production [kWh]`, na.rm = TRUE)
+solar_daily <- aggregate_values(
+  data = production_data,
+  time_col = "Time",
+  value_col = "Production [kWh]",
+  period = "daily",
+  source_name = "Solar production"
+)
 
-monthly_production <- prdouction_data |> 
-  mutate(Month = format(Time, "%Y-%m")) |> 
-  group_by(Month) |> 
-  summarise(`Production [kWh]` = sum(`Production [kWh]`, na.rm = TRUE))
+solar_weekly <- aggregate_values(
+  data = production_data,
+  time_col = "Time",
+  value_col = "Production [kWh]",
+  period = "weekly",
+  source_name = "Solar production"
+)
 
-monthly_production <- monthly_production |> 
-  mutate(Month_date = as.Date(paste0(Month, "-01")))
+solar_monthly <- aggregate_values(
+  data = production_data,
+  time_col = "Time",
+  value_col = "Production [kWh]",
+  period = "monthly",
+  source_name = "Solar production"
+)
 
-weekly_production <- prdouction_data |> 
-  mutate(
-    Week_start = floor_date(as.Date(Time), unit = "week", week_start = 1),
-    Week = format(Week_start, "%G-W%V")
-  ) |> 
-  group_by(Week_start, Week) |> 
-  summarise(
-    `Production [kWh]` = sum(`Production [kWh]`, na.rm = TRUE),
-    .groups = "drop"
-  )
+solar_yearly <- aggregate_values(
+  data = production_data,
+  time_col = "Time",
+  value_col = "Production [kWh]",
+  period = "yearly",
+  source_name = "Solar production"
+)
 
-daily_production <- prdouction_data |> 
-  mutate(Date = as.Date(Time)) |> 
-  group_by(Date) |> 
-  summarise(
-    `Production [kWh]` = sum(`Production [kWh]`, na.rm = TRUE),
-    .groups = "drop"
-  )
+solar_total <- total_value(
+  data = production_data,
+  value_col = "Production [kWh]"
+)
 
-ggplot(daily_production, aes(x = Date, y = `Production [kWh]`)) +
-  geom_col() +
-  labs(
-    title = "Daly Production",
-    x = "Date",
-    y = "Production [kWh]"
-  ) +
-  theme_minimal()
+plot_values(
+  solar_daily,
+  title = "Daily Production",
+  y_label = "Production [kWh]",
+  plot_type = "bar"
+)
 
-ggplot(monthly_production, aes(x = Month_date, y = `Production [kWh]`)) +
-  geom_col() +
-  labs(
-    title = "Monthly Production",
-    x = "Month",
-    y = "Production [kWh]"
-  ) +
-  theme_minimal()
+plot_values(
+  solar_weekly,
+  title = "Weekly Production",
+  y_label = "Production [kWh]",
+  plot_type = "bar"
+)
 
-ggplot(weekly_production, aes(x = Week_start, y = `Production [kWh]`)) +
-  geom_col() +
-  labs(
-    title = "Weekly Production",
-    x = "Week",
-    y = "Production [kWh]"
-  ) +
-  theme_minimal()
-
+plot_values(
+  solar_monthly,
+  title = "Monthly Production",
+  y_label = "Production [kWh]",
+  plot_type = "bar"
+)
 
 ## Total Power Usage
 
 total_power_usage <- read_csv("Verbrauch/Verbrauch_Gesamt_Giesserei_2025.csv")
+
+total_power_usage$Timestamp <- as.POSIXct(total_power_usage$Timestamp,
+                                   format = "%Y-%m-%dT%H:%M:%S",
+                                   tz = "Europe/Zurich"
+)
+
+
+
+
+
+
