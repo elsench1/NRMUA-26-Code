@@ -160,6 +160,26 @@ alt_solar_total <- read_excel(
   sheet = "Total"
   ) |> 
   slice(-n()) |> 
-  mutate(Production = Production * 0.75) |> 
-  select(-Value)
+  mutate(Production = Production * 0.75) |> # 3/4 use of the roof surface
+  select(-Value) |> 
+  mutate(Month = factor(Month, levels = month.name)) |> 
+  rename(
+    Time = Month,
+    Value = Production
+  )
+
+alt_solar_power <- total_value(
+  data = alt_solar_total, 
+  value_col = "Value"
+  ) %>% 
+  {. / 940}
+
+plot_values(
+  alt_solar_total,
+  title = "Theoretical possible PV production",
+  x_label = "Month",
+  y_label = "Production [kWh]",
+  plot_type = "bar"
+)
+
 
