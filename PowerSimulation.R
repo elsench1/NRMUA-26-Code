@@ -15,7 +15,14 @@ plot_file   <- "output/simulation_plot.png"
 charge_efficiency    <- 0.97   # Lade-Wirkungsgrad
 discharge_efficiency <- 0.95   # Entlade-Wirkungsgrad
 c_rate_max           <- 0.5    # max. C-Wert
-battery_capacity_kWh <- 380    # Batteriekapazität in kWh
+battery_capacity_kWh <- 380    # Startwert für Batteriekapazität in kWh
+
+# Suchparameter für minimale Batteriegrösse
+find_minimum_battery <- TRUE
+minimum_battery_accuracy_kWh <- 1
+max_capacity_search_iterations <- 20
+max_capacity_allowed_kWh <- 1e8
+zero_grid_import_tolerance_kWh <- 1e-6
 
 # Verbrauchsspalte für die Batterie-Simulation
 # Möglich wären z.B.:
@@ -32,8 +39,316 @@ simulation_year <- 2025
 warmup_source_start <- ymd_hms("2025-10-01 00:00:00", tz = "Europe/Zurich")
 warmup_source_end   <- ymd_hms("2026-01-01 00:00:00", tz = "Europe/Zurich")
 
-# Anfangszustand für den künstlichen Warm-up
-initial_soc_kWh <- battery_capacity_kWh
+# Plot-Auflösung
+plot_interval_hours <- 24
+
+# =========================
+# Hilfsfunktionen
+# =========================
+
+parse_time_utc <- function(x) {
+  parsed <- parse_date_time(
+    x,
+    orders = c("ymd HMS z", "ymd HMS", "ymd HM z", "ymd HM", "ymd"),
+    tz = "UTC"
+  )
+  as_datetime(parsed, tz = "UTC")
+}
+
+run_battery_simulation <- function(
+    df_input,
+    battery_capacity_kWh,
+    charge_efficiency,
+    discharge_efficiency,
+    c_rate_max,
+    consumption_col,
+    initial_soc_kWh = battery_capacity_kWh
+) {
+  df_work <- df_input %>%
+    arrange(Time_CH) %>%
+    mutate(
+      Battery_SOC_kWh = NA_real_,
+      Battery_SOC_percent = NA_real_,
+      BatteryChargeFromPV_kWh = 0,
+      BatteryDischargeToLoad_kWh = 0,
+      GridImportAfterBattery_kWh = NA_real_,
+      FeedInAfterBattery_kWh = NA_real_
+    )
+  
+  soc_kWh <- min(initial_soc_kWh, battery_capacity_kWh)
+  max_power_kW <- battery_capacity_kWh * c_rate_max
+  
+  for (i in seq_len(nrow(df_work))) {
+    production_kWh <- df_work$Production_kWh[i]
+    consumption_kWh <- df_work[[consumption_col]][i]
+    timestep_h <- df_work$timestep_h[i]
+    
+    if (is.na(production_kWh) || is.na(consumption_kWh) || is.na(timestep_h)) {
+      df_work$Battery_SOC_kWh[i] <- soc_kWh
+      df_work$Battery_SOC_percent[i] <- ifelse(battery_capacity_kWh > 0, soc_kWh / battery_capacity_kWh * 100, NA_real_)
+      next
+    }
+    
+    max_energy_per_step_kWh <- max_power_kW * timestep_h
+    surplus_kWh <- production_kWh - consumption_kWh
+    
+    battery_charge_from_pv_kWh <- 0
+    battery_discharge_to_load_kWh <- 0
+    grid_import_after_battery_kWh <- 0
+    feed_in_after_battery_kWh <- 0
+    
+    if (surplus_kWh > 0) {
+      # PV-Überschuss: Batterie laden
+      battery_headroom_kWh <- battery_capacity_kWh - soc_kWh
+      
+      # AC-Energie, die aus dem Überschuss in Richtung Batterie geht.
+      max_charge_ac_kWh <- min(
+        surplus_kWh,
+        max_energy_per_step_kWh,
+        battery_headroom_kWh / charge_efficiency
+      )
+      
+      soc_kWh <- soc_kWh + max_charge_ac_kWh * charge_efficiency
+      
+      battery_charge_from_pv_kWh <- max_charge_ac_kWh
+      feed_in_after_battery_kWh <- surplus_kWh - max_charge_ac_kWh
+      grid_import_after_battery_kWh <- 0
+      
+    } else if (surplus_kWh < 0) {
+      # Defizit: Batterie entladen
+      deficit_kWh <- abs(surplus_kWh)
+      
+      # DC-Energie, die aus der Batterie entnommen wird.
+      max_discharge_dc_kWh <- min(
+        soc_kWh,
+        max_energy_per_step_kWh,
+        deficit_kWh / discharge_efficiency
+      )
+      
+      delivered_to_load_kWh <- max_discharge_dc_kWh * discharge_efficiency
+      
+      soc_kWh <- soc_kWh - max_discharge_dc_kWh
+      
+      battery_discharge_to_load_kWh <- delivered_to_load_kWh
+      grid_import_after_battery_kWh <- deficit_kWh - delivered_to_load_kWh
+      feed_in_after_battery_kWh <- 0
+      
+    } else {
+      grid_import_after_battery_kWh <- 0
+      feed_in_after_battery_kWh <- 0
+    }
+    
+    # Numerische Begrenzung
+    soc_kWh <- max(0, min(battery_capacity_kWh, soc_kWh))
+    
+    df_work$Battery_SOC_kWh[i] <- soc_kWh
+    df_work$Battery_SOC_percent[i] <- ifelse(battery_capacity_kWh > 0, soc_kWh / battery_capacity_kWh * 100, NA_real_)
+    df_work$BatteryChargeFromPV_kWh[i] <- battery_charge_from_pv_kWh
+    df_work$BatteryDischargeToLoad_kWh[i] <- battery_discharge_to_load_kWh
+    df_work$GridImportAfterBattery_kWh[i] <- grid_import_after_battery_kWh
+    df_work$FeedInAfterBattery_kWh[i] <- feed_in_after_battery_kWh
+  }
+  
+  df_work %>%
+    mutate(
+      ProductionPower_sim_kW = Production_kWh / timestep_h,
+      ConsumptionPower_sim_kW = .data[[consumption_col]] / timestep_h
+    )
+}
+
+make_simulation_summary <- function(df_result, consumption_col) {
+  df_result %>%
+    summarise(
+      SimulationStart = min(Time_CH),
+      SimulationEnd = max(Time_CH),
+      Start_SOC_kWh = first(Battery_SOC_kWh),
+      Start_SOC_percent = first(Battery_SOC_percent),
+      End_SOC_kWh = last(Battery_SOC_kWh),
+      End_SOC_percent = last(Battery_SOC_percent),
+      Mean_SOC_kWh = mean(Battery_SOC_kWh, na.rm = TRUE),
+      Mean_SOC_percent = mean(Battery_SOC_percent, na.rm = TRUE),
+      Min_SOC_percent = min(Battery_SOC_percent, na.rm = TRUE),
+      Max_SOC_percent = max(Battery_SOC_percent, na.rm = TRUE),
+      Production_kWh = sum(Production_kWh, na.rm = TRUE),
+      Consumption_kWh = sum(.data[[consumption_col]], na.rm = TRUE),
+      BatteryChargeFromPV_kWh = sum(BatteryChargeFromPV_kWh, na.rm = TRUE),
+      BatteryDischargeToLoad_kWh = sum(BatteryDischargeToLoad_kWh, na.rm = TRUE),
+      GridImportAfterBattery_kWh = sum(GridImportAfterBattery_kWh, na.rm = TRUE),
+      FeedInAfterBattery_kWh = sum(FeedInAfterBattery_kWh, na.rm = TRUE)
+    )
+}
+
+simulate_capacity <- function(
+    df_work_base,
+    capacity_kWh,
+    charge_efficiency,
+    discharge_efficiency,
+    c_rate_max,
+    consumption_col,
+    zero_grid_import_tolerance_kWh
+) {
+  df_sim_all <- run_battery_simulation(
+    df_input = df_work_base,
+    battery_capacity_kWh = capacity_kWh,
+    charge_efficiency = charge_efficiency,
+    discharge_efficiency = discharge_efficiency,
+    c_rate_max = c_rate_max,
+    consumption_col = consumption_col,
+    initial_soc_kWh = capacity_kWh
+  )
+  
+  df_result <- df_sim_all %>%
+    filter(!IsWarmup) %>%
+    arrange(Time_CH)
+  
+  summary_result <- make_simulation_summary(df_result, consumption_col)
+  total_grid_import_kWh <- summary_result$GridImportAfterBattery_kWh
+  
+  list(
+    capacity_kWh = capacity_kWh,
+    sufficient = total_grid_import_kWh <= zero_grid_import_tolerance_kWh,
+    total_grid_import_kWh = total_grid_import_kWh,
+    df_result = df_result,
+    summary_result = summary_result
+  )
+}
+
+find_minimum_capacity <- function(
+    df_work_base,
+    start_capacity_kWh,
+    charge_efficiency,
+    discharge_efficiency,
+    c_rate_max,
+    consumption_col,
+    accuracy_kWh = 1,
+    zero_grid_import_tolerance_kWh = 1e-6,
+    max_iterations = 20,
+    max_capacity_allowed_kWh = 1e8
+) {
+  
+  lower_capacity_kWh <- 0
+  upper_capacity_kWh <- ceiling(start_capacity_kWh)
+  search_log <- tibble(
+    Phase = character(),
+    Capacity_kWh = numeric(),
+    GridImportAfterBattery_kWh = numeric(),
+    Sufficient = logical()
+  )
+  
+  # 1) Obere Grenze finden: Startwert, dann jeweils Faktor 10.
+  for (iteration in seq_len(max_iterations)) {
+    test <- simulate_capacity(
+      df_work_base = df_work_base,
+      capacity_kWh = upper_capacity_kWh,
+      charge_efficiency = charge_efficiency,
+      discharge_efficiency = discharge_efficiency,
+      c_rate_max = c_rate_max,
+      consumption_col = consumption_col,
+      zero_grid_import_tolerance_kWh = zero_grid_import_tolerance_kWh
+    )
+    
+    search_log <- bind_rows(
+      search_log,
+      tibble(
+        Phase = "upper_bound_search",
+        Capacity_kWh = upper_capacity_kWh,
+        GridImportAfterBattery_kWh = test$total_grid_import_kWh,
+        Sufficient = test$sufficient
+      )
+    )
+    
+    message(
+      "Test obere Grenze: ", upper_capacity_kWh, " kWh -> Netzbezug ",
+      round(test$total_grid_import_kWh, 6), " kWh"
+    )
+    
+    if (test$sufficient) {
+      break
+    }
+    
+    lower_capacity_kWh <- upper_capacity_kWh
+    upper_capacity_kWh <- upper_capacity_kWh * 10
+    
+    if (upper_capacity_kWh > max_capacity_allowed_kWh) {
+      stop(
+        "Auch eine sehr grosse Batterie reicht nicht aus. ",
+        "Vermutlich ist die Jahresproduktion inklusive Wirkungsgradverluste zu klein, ",
+        "oder es gibt längere Defizitperioden, die selbst mit grossem Speicher nicht abgedeckt werden. ",
+        "Letzte getestete nicht ausreichende Grösse: ", lower_capacity_kWh, " kWh."
+      )
+    }
+  }
+  
+  if (!test$sufficient) {
+    stop("Keine ausreichende obere Batteriegrenze gefunden.")
+  }
+  
+  # 2) Binäre Suche zwischen letzter nicht ausreichender und erster ausreichender Grösse.
+  best_sufficient_test <- test
+  
+  while ((upper_capacity_kWh - lower_capacity_kWh) > accuracy_kWh) {
+    mid_capacity_kWh <- floor((lower_capacity_kWh + upper_capacity_kWh) / 2)
+    
+    if (mid_capacity_kWh <= lower_capacity_kWh) {
+      mid_capacity_kWh <- lower_capacity_kWh + accuracy_kWh
+    }
+    
+    test <- simulate_capacity(
+      df_work_base = df_work_base,
+      capacity_kWh = mid_capacity_kWh,
+      charge_efficiency = charge_efficiency,
+      discharge_efficiency = discharge_efficiency,
+      c_rate_max = c_rate_max,
+      consumption_col = consumption_col,
+      zero_grid_import_tolerance_kWh = zero_grid_import_tolerance_kWh
+    )
+    
+    search_log <- bind_rows(
+      search_log,
+      tibble(
+        Phase = "binary_search",
+        Capacity_kWh = mid_capacity_kWh,
+        GridImportAfterBattery_kWh = test$total_grid_import_kWh,
+        Sufficient = test$sufficient
+      )
+    )
+    
+    message(
+      "Binäre Suche: ", mid_capacity_kWh, " kWh -> Netzbezug ",
+      round(test$total_grid_import_kWh, 6), " kWh"
+    )
+    
+    if (test$sufficient) {
+      upper_capacity_kWh <- mid_capacity_kWh
+      best_sufficient_test <- test
+    } else {
+      lower_capacity_kWh <- mid_capacity_kWh
+    }
+  }
+  
+  # Zur Sicherheit die obere Grenze final simulieren, falls der beste Treffer nicht exakt upper ist.
+  final_test <- simulate_capacity(
+    df_work_base = df_work_base,
+    capacity_kWh = upper_capacity_kWh,
+    charge_efficiency = charge_efficiency,
+    discharge_efficiency = discharge_efficiency,
+    c_rate_max = c_rate_max,
+    consumption_col = consumption_col,
+    zero_grid_import_tolerance_kWh = zero_grid_import_tolerance_kWh
+  )
+  
+  if (!final_test$sufficient) {
+    stop("Interner Fehler: Die ermittelte obere Grenze reicht nicht aus.")
+  }
+  
+  list(
+    minimum_capacity_kWh = ceiling(upper_capacity_kWh),
+    last_insufficient_capacity_kWh = lower_capacity_kWh,
+    first_sufficient_capacity_kWh = upper_capacity_kWh,
+    result = final_test,
+    search_log = search_log
+  )
+}
 
 # =========================
 # Daten importieren
@@ -60,20 +375,6 @@ required_cols <- c(
 missing_cols <- setdiff(required_cols, names(df_raw))
 if (length(missing_cols) > 0) {
   stop("Folgende Spalten fehlen in der CSV: ", paste(missing_cols, collapse = ", "))
-}
-
-# Robustes Parsen der Zeitspalte.
-# Unterstützt z.B.:
-# 2024-12-31T23:00:00Z
-# 2024-12-31 23:00:00
-# 2024-12-31
-parse_time_utc <- function(x) {
-  parsed <- parse_date_time(
-    x,
-    orders = c("ymd HMS z", "ymd HMS", "ymd HM z", "ymd HM", "ymd"),
-    tz = "UTC"
-  )
-  as_datetime(parsed, tz = "UTC")
 }
 
 df <- df_raw %>%
@@ -139,7 +440,7 @@ if (nrow(df_warmup) == 0) {
 
 # Warm-up und eigentliche Simulation zusammenführen.
 # Die Warm-up-Werte dienen nur dazu, den SOC am 01.01. einzuschwingen.
-df_work <- bind_rows(df_warmup, df_simulation) %>%
+df_work_base <- bind_rows(df_warmup, df_simulation) %>%
   arrange(Time_CH)
 
 message("Künstlicher Warm-up verwendet Werte von: ", warmup_source_start, " bis ", warmup_source_end)
@@ -150,150 +451,65 @@ message("Eigentliche Simulation startet am: ", simulation_start)
 # Zeitschritt bestimmen
 # =========================
 
-df_work <- df_work %>%
+df_work_base <- df_work_base %>%
   mutate(
     next_time = lead(Time_CH),
     timestep_h = as.numeric(difftime(next_time, Time_CH, units = "hours"))
   )
 
-median_timestep <- median(df_work$timestep_h[df_work$timestep_h > 0], na.rm = TRUE)
+median_timestep <- median(df_work_base$timestep_h[df_work_base$timestep_h > 0], na.rm = TRUE)
 
 if (is.na(median_timestep)) {
   stop("Der Zeitschritt konnte nicht bestimmt werden.")
 }
 
-df_work <- df_work %>%
+df_work_base <- df_work_base %>%
   mutate(
     timestep_h = if_else(is.na(timestep_h) | timestep_h <= 0, median_timestep, timestep_h)
   )
 
 # =========================
-# Simulationsspalten vorbereiten
+# Minimal nötige Batteriegrösse suchen
 # =========================
 
-df_work <- df_work %>%
-  mutate(
-    Battery_SOC_kWh = NA_real_,
-    Battery_SOC_percent = NA_real_,
-    BatteryChargeFromPV_kWh = 0,
-    BatteryDischargeToLoad_kWh = 0,
-    GridImportAfterBattery_kWh = NA_real_,
-    FeedInAfterBattery_kWh = NA_real_
+if (find_minimum_battery) {
+  minimum_search <- find_minimum_capacity(
+    df_work_base = df_work_base,
+    start_capacity_kWh = battery_capacity_kWh,
+    charge_efficiency = charge_efficiency,
+    discharge_efficiency = discharge_efficiency,
+    c_rate_max = c_rate_max,
+    consumption_col = consumption_col,
+    accuracy_kWh = minimum_battery_accuracy_kWh,
+    zero_grid_import_tolerance_kWh = zero_grid_import_tolerance_kWh,
+    max_iterations = max_capacity_search_iterations,
+    max_capacity_allowed_kWh = max_capacity_allowed_kWh
   )
-
-# =========================
-# Batterie-Simulation
-# =========================
-
-soc_kWh <- initial_soc_kWh
-max_power_kW <- battery_capacity_kWh * c_rate_max
-
-for (i in seq_len(nrow(df_work))) {
   
-  production_kWh <- df_work$Production_kWh[i]
-  consumption_kWh <- df_work[[consumption_col]][i]
-  timestep_h <- df_work$timestep_h[i]
+  battery_capacity_kWh <- minimum_search$minimum_capacity_kWh
+  df_result <- minimum_search$result$df_result
+  summary_result <- minimum_search$result$summary_result
   
-  if (is.na(production_kWh) || is.na(consumption_kWh)) {
-    df_work$Battery_SOC_kWh[i] <- soc_kWh
-    df_work$Battery_SOC_percent[i] <- soc_kWh / battery_capacity_kWh * 100
-    next
-  }
+  message("Minimale Batteriegrösse ohne Netzbezug: ", battery_capacity_kWh, " kWh")
+  message("Letzte nicht ausreichende Grösse: ", minimum_search$last_insufficient_capacity_kWh, " kWh")
+  message("Erster ausreichender Wert: ", minimum_search$first_sufficient_capacity_kWh, " kWh")
   
-  max_energy_per_step_kWh <- max_power_kW * timestep_h
-  surplus_kWh <- production_kWh - consumption_kWh
+  print(minimum_search$search_log)
   
-  battery_charge_from_pv_kWh <- 0
-  battery_discharge_to_load_kWh <- 0
-  grid_import_after_battery_kWh <- 0
-  feed_in_after_battery_kWh <- 0
+} else {
+  simulation_result <- simulate_capacity(
+    df_work_base = df_work_base,
+    capacity_kWh = battery_capacity_kWh,
+    charge_efficiency = charge_efficiency,
+    discharge_efficiency = discharge_efficiency,
+    c_rate_max = c_rate_max,
+    consumption_col = consumption_col,
+    zero_grid_import_tolerance_kWh = zero_grid_import_tolerance_kWh
+  )
   
-  if (surplus_kWh > 0) {
-    # PV-Überschuss: Batterie laden
-    battery_headroom_kWh <- battery_capacity_kWh - soc_kWh
-    
-    # AC-Energie, die aus dem Überschuss in Richtung Batterie geht.
-    max_charge_ac_kWh <- min(
-      surplus_kWh,
-      max_energy_per_step_kWh,
-      battery_headroom_kWh / charge_efficiency
-    )
-    
-    soc_kWh <- soc_kWh + max_charge_ac_kWh * charge_efficiency
-    
-    battery_charge_from_pv_kWh <- max_charge_ac_kWh
-    feed_in_after_battery_kWh <- surplus_kWh - max_charge_ac_kWh
-    grid_import_after_battery_kWh <- 0
-    
-  } else if (surplus_kWh < 0) {
-    # Defizit: Batterie entladen
-    deficit_kWh <- abs(surplus_kWh)
-    
-    # DC-Energie, die aus der Batterie entnommen wird.
-    max_discharge_dc_kWh <- min(
-      soc_kWh,
-      max_energy_per_step_kWh,
-      deficit_kWh / discharge_efficiency
-    )
-    
-    delivered_to_load_kWh <- max_discharge_dc_kWh * discharge_efficiency
-    
-    soc_kWh <- soc_kWh - max_discharge_dc_kWh
-    
-    battery_discharge_to_load_kWh <- delivered_to_load_kWh
-    grid_import_after_battery_kWh <- deficit_kWh - delivered_to_load_kWh
-    feed_in_after_battery_kWh <- 0
-    
-  } else {
-    # Produktion und Verbrauch gleich
-    grid_import_after_battery_kWh <- 0
-    feed_in_after_battery_kWh <- 0
-  }
-  
-  # Numerische Begrenzung
-  soc_kWh <- max(0, min(battery_capacity_kWh, soc_kWh))
-  
-  df_work$Battery_SOC_kWh[i] <- soc_kWh
-  df_work$Battery_SOC_percent[i] <- soc_kWh / battery_capacity_kWh * 100
-  df_work$BatteryChargeFromPV_kWh[i] <- battery_charge_from_pv_kWh
-  df_work$BatteryDischargeToLoad_kWh[i] <- battery_discharge_to_load_kWh
-  df_work$GridImportAfterBattery_kWh[i] <- grid_import_after_battery_kWh
-  df_work$FeedInAfterBattery_kWh[i] <- feed_in_after_battery_kWh
+  df_result <- simulation_result$df_result
+  summary_result <- simulation_result$summary_result
 }
-
-# =========================
-# Ergebnis ab Jahreswechsel
-# =========================
-
-# Nur die echte Simulation wird exportiert.
-# Der künstliche Warm-up wird nicht ausgegeben.
-df_result <- df_work %>%
-  filter(!IsWarmup) %>%
-  arrange(Time_CH) %>%
-  mutate(
-    ProductionPower_sim_kW = Production_kWh / timestep_h,
-    ConsumptionPower_sim_kW = .data[[consumption_col]] / timestep_h
-  )
-
-summary_result <- df_result %>%
-  summarise(
-    SimulationStart = min(Time_CH),
-    SimulationEnd = max(Time_CH),
-    Start_SOC_kWh = first(Battery_SOC_kWh),
-    Start_SOC_percent = first(Battery_SOC_percent),
-    End_SOC_kWh = last(Battery_SOC_kWh),
-    End_SOC_percent = last(Battery_SOC_percent),
-    Mean_SOC_kWh = mean(Battery_SOC_kWh, na.rm = TRUE),
-    Mean_SOC_percent = mean(Battery_SOC_percent, na.rm = TRUE),
-    Min_SOC_percent = min(Battery_SOC_percent, na.rm = TRUE),
-    Max_SOC_percent = max(Battery_SOC_percent, na.rm = TRUE),
-    Production_kWh = sum(Production_kWh, na.rm = TRUE),
-    Consumption_kWh = sum(.data[[consumption_col]], na.rm = TRUE),
-    BatteryChargeFromPV_kWh = sum(BatteryChargeFromPV_kWh, na.rm = TRUE),
-    BatteryDischargeToLoad_kWh = sum(BatteryDischargeToLoad_kWh, na.rm = TRUE),
-    GridImportAfterBattery_kWh = sum(GridImportAfterBattery_kWh, na.rm = TRUE),
-    FeedInAfterBattery_kWh = sum(FeedInAfterBattery_kWh, na.rm = TRUE)
-  )
 
 print(summary_result)
 
@@ -310,9 +526,11 @@ wanted_cols <- c(
   "Original_Time_CH",
   "Production_kWh",
   "ProductionPower_kW",
+  "ProductionPower_sim_kW",
   "ConsumptionTotal_kWh",
   "ConsumptionEV_kWh",
   "ConsumptionWithoutEV_kWh",
+  "ConsumptionPower_sim_kW",
   "NetConsumption_kWh",
   "SelfConsumptionPotential_kWh",
   "FeedInPotential_kWh",
@@ -339,10 +557,8 @@ write_csv(df_out, output_file)
 
 # Linke y-Achse: Leistung in kW
 # Rechte y-Achse: Batterie-SOC in %
-# Für bessere Lesbarkeit werden 4-Stunden-Mittelwerte geplottet.
+# Für bessere Lesbarkeit werden Mittelwerte geplottet.
 # Die eigentliche Simulation und der CSV-Export bleiben weiterhin in Originalauflösung.
-plot_interval_hours <- 24
-
 plot_data <- df_result %>%
   mutate(
     PlotTime_CH = floor_date(Time_CH, unit = paste(plot_interval_hours, "hours"))
@@ -395,7 +611,7 @@ plot_result <- ggplot(plot_data, aes(x = PlotTime_CH)) +
   labs(
     title = "PV-Produktion, totaler Verbrauch und Batterie-SOC",
     subtitle = paste0(
-      plot_interval_hours ,"-Stunden-Mittelwerte | ",
+      plot_interval_hours, "-Stunden-Mittelwerte | ",
       "Simulation ", simulation_year,
       " | Batterie: ", battery_capacity_kWh, " kWh",
       " | C-Rate: ", c_rate_max
@@ -420,4 +636,6 @@ ggsave(
 message("Simulation abgeschlossen. Datei gespeichert unter: ", output_file)
 message("Plot gespeichert unter: ", plot_file)
 message("Plot verwendet ", plot_interval_hours, "-Stunden-Mittelwerte.")
+message("Verwendete Batteriegrösse: ", battery_capacity_kWh, " kWh")
+message("Netzbezug nach Batterie: ", round(summary_result$GridImportAfterBattery_kWh, 6), " kWh")
 message("SOC am Start der echten Simulation: ", round(summary_result$Start_SOC_percent, 2), " %")
