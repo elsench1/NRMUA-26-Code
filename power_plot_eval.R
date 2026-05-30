@@ -3,6 +3,7 @@ library(dplyr)
 library(lubridate)
 library(ggplot2)
 library(readr)
+library(scales)
 
 source("functions.R")
 
@@ -182,4 +183,72 @@ plot_values(
   plot_type = "bar"
 )
 
+## Gemeinsamer Plot
 
+## Gemeinsamer Monatsplot
+
+month_levels <- month.name
+
+solar_monthly_plot <- solar_monthly |>
+  mutate(
+    Month = month(Time, label = FALSE),
+    Month = month.name[Month],
+    Type = "Production"
+  ) |>
+  select(Month, Value, Type)
+
+usage_monthly_plot <- total_power_usage_monthly |>
+  mutate(
+    Month = month(Time, label = FALSE),
+    Month = month.name[Month],
+    Type = "Consumption"
+  ) |>
+  select(Month, Value, Type)
+
+alt_solar_plot <- alt_solar_total |>
+  mutate(
+    Month = as.character(Time),
+    Type = "Theoretical possible Production"
+  ) |>
+  select(Month, Value, Type)
+
+monthly_comparison <- bind_rows(
+  solar_monthly_plot,
+  usage_monthly_plot,
+  alt_solar_plot
+) |>
+  mutate(
+    Month = factor(Month, levels = month_levels),
+    Type = factor(
+      Type,
+      levels = c("Production", "Consumption", "Theoretical possible Production")
+    )
+  )
+
+ggplot(monthly_comparison, aes(x = Month, y = Value, fill = Type)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  labs(
+    title = "Monthly Comparision",
+    x = "Month",
+    y = "Energy [kWh]",
+    fill = "Value"
+  ) +
+  theme_minimal()
+
+
+
+ggplot(monthly_comparison, aes(x = Month, y = Value, fill = Type)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  scale_y_continuous(
+    trans = pseudo_log_trans(sigma = 1000),
+    breaks = c(2500,5000, 10000, 15000, 20000, 25000, 50000, 60000),
+    labels = label_number(big.mark = "'")
+  ) +
+  coord_cartesian(ylim = c(2500, 60000)) +
+  labs(
+    title = "Monthly Comparison",
+    x = "Month",
+    y = "Energy [kWh]",
+    fill = "Value"
+  ) +
+  theme_minimal()
