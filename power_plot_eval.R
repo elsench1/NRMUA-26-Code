@@ -154,6 +154,77 @@ plot_values(
 )
 
 
+## Total E Mobility Usage
+
+total_E_mob_usage <- read_csv("Verbrauch/Verbrauch_E Mobility_2025.csv")
+
+total_E_mob_usage <- total_E_mob_usage |> 
+  select(
+    -StartDateTime,
+    -EndDateTime,
+    -Resolution,
+    -Unit,
+    -MeterID,
+    -SourceFile,
+    -Date
+  )
+
+
+total_E_mob_usage_daily <- aggregate_values(
+  data = total_E_mob_usage,
+  time_col = "Timestamp",
+  value_col = "Volume",
+  period = "daily",
+)
+
+total_E_mob_usage_weekly <- aggregate_values(
+  data = total_E_mob_usage,
+  time_col = "Timestamp",
+  value_col = "Volume",
+  period = "weekly",
+)
+
+total_E_mob_usage_monthly <- aggregate_values(
+  data = total_E_mob_usage,
+  time_col = "Timestamp",
+  value_col = "Volume",
+  period = "monthly",
+)
+
+total_E_mob_usage_yearly <- aggregate_values(
+  data = total_E_mob_usage,
+  time_col = "Timestamp",
+  value_col = "Volume",
+  period = "yearly",
+  # source_name = "Solar production"
+)
+
+total_E_mob_usage_total <- total_value(
+  data = total_E_mob_usage,
+  value_col = "Volume"
+)
+
+plot_values(
+  total_E_mob_usage_daily,
+  title = "Daily E mob Usage",
+  y_label = "Volume",
+  plot_type = "bar"
+)
+
+plot_values(
+  total_E_mob_usage_weekly,
+  title = "Weekly E mob Usage",
+  y_label = "Volume",
+  plot_type = "bar"
+)
+
+plot_values(
+  total_E_mob_usage_monthly,
+  title = "Monthly E mob Usage",
+  y_label = "Volume",
+  plot_type = "bar"
+)
+
 ## Alternative production
 
 alt_solar_total <- read_excel(

@@ -486,15 +486,15 @@ plot_simulation_result <- function(
     geom_line(aes(
       y = ConsumptionPower_avg_kW,
       color = "Totaler Verbrauch"),
-      linewidth = 0.45) +
+      linewidth = 1) + # 0.45
     geom_line(aes(
       y = ProductionPower_avg_kW,
       color = "PV-Produktion"),
-      linewidth = 0.45) +
+      linewidth = 1) + # 0.45
     geom_line(aes(
       y = Battery_SOC_avg_percent * soc_scale_factor,
       color = "Batterie-SOC"), 
-      linewidth = 0.55) +
+      linewidth = 1) + # 0.55
     scale_y_continuous(
       name = "Leistung [kW]",
       sec.axis = sec_axis(
