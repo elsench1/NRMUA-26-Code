@@ -24,3 +24,6 @@ production_data$Time <- as.POSIXct(
 )
 
 producedPower <- total_value(production_data, "Production [kWh]")
+
+
+
