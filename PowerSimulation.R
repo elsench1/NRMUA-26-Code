@@ -4,7 +4,7 @@ input_file <- "output/energy_15min_prepared.csv"
 output_file <- "output/simulation_fixed_battery_output.csv"
 plot_file <- "output/simulation_fixed_battery_plot.png"
 
-charge_efficiency <- 0.97
+charge_efficiency <- 0.95
 discharge_efficiency <- 0.95
 c_rate_max <- 0.5
 battery_capacity_kWh <- 400
