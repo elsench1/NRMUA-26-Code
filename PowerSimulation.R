@@ -7,7 +7,7 @@ plot_file <- "output/simulation_fixed_battery_plot.png"
 charge_efficiency <- 0.97
 discharge_efficiency <- 0.95
 c_rate_max <- 0.5
-battery_capacity_kWh <- 380
+battery_capacity_kWh <- 400
 zero_grid_import_tolerance_kWh <- 1e-6
 
 consumption_col <- "ConsumptionTotal_kWh"
