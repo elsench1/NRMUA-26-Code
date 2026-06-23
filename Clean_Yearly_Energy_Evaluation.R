@@ -12,6 +12,7 @@ library(dplyr)
 library(lubridate)
 library(purrr)
 library(tibble)
+library(tidyr)
 
 # ------------------------------------------------------------
 # 0) Einstellungen
@@ -55,19 +56,69 @@ output_xlsx <- "output/clean_yearly_energy_summary.xlsx"
 year_start <- ymd_hms(paste0(target_year, "-01-01 00:00:00"), tz = tz_local)
 year_end <- ymd_hms(paste0(target_year + 1, "-01-01 00:00:00"), tz = tz_local)
 
+to_number <- function(x) {
+  if (is.numeric(x)) {
+    return(as.numeric(x))
+  }
+  text <- trimws(as.character(x))
+  text <- gsub("\\s", "", text)
+  text <- gsub("'", "", text, fixed = TRUE)
+  both <- grepl(",", text, fixed = TRUE) & grepl(".", text, fixed = TRUE)
+  text[both] <- gsub(".", "", text[both], fixed = TRUE)
+  text <- gsub(",", ".", text, fixed = TRUE)
+  suppressWarnings(as.numeric(text))
+}
+
+parse_fixed_datetime <- function(text, formats, tz = tz_local) {
+  text <- trimws(as.character(text))
+  text <- gsub("T", " ", text, fixed = TRUE)
+  text <- sub("Z$", "", text)
+  out <- as.POSIXct(rep(NA_real_, length(text)), origin = "1970-01-01", tz = tz)
+
+  for (fmt in formats) {
+    idx <- is.na(out) & !is.na(text) & text != ""
+    if (!any(idx)) {
+      break
+    }
+    parsed <- suppressWarnings(as.POSIXct(strptime(text[idx], format = fmt, tz = tz)))
+    out[idx] <- parsed
+  }
+
+  out
+}
+
 parse_timestamp_ch <- function(x, tz = tz_local) {
-  parsed <- parse_date_time(
+  if (inherits(x, "POSIXct") || inherits(x, "POSIXlt")) {
+    return(as.POSIXct(x, tz = tz))
+  }
+  if (inherits(x, "Date")) {
+    return(as.POSIXct(x, tz = tz))
+  }
+  if (is.numeric(x)) {
+    # Excel-Datumsseriennummern, falls Excel solche Werte liefert.
+    return(as.POSIXct((as.numeric(x) - 25569) * 86400, origin = "1970-01-01", tz = tz))
+  }
+
+  parse_fixed_datetime(
     x,
-    orders = c(
-      "ymd HMS", "ymd HM", "ymd",
-      "ymdT HMS", "ymdT HM",
-      "dmY HMS", "dmY HM", "dmY",
-      "mdY HMS", "mdY HM", "mdY",
-      "Ymd HM", "Ymd HMS"
+    formats = c(
+      "%Y-%m-%d %H:%M:%S",
+      "%Y-%m-%d %H:%M",
+      "%Y-%m-%d",
+      "%d.%m.%Y %H:%M:%S",
+      "%d.%m.%Y %H:%M",
+      "%d.%m.%Y",
+      "%d/%m/%Y %H:%M:%S",
+      "%d/%m/%Y %H:%M",
+      "%d/%m/%Y",
+      "%m/%d/%Y %H:%M:%S",
+      "%m/%d/%Y %H:%M",
+      "%m/%d/%Y",
+      "%Y%m%d %H:%M:%S",
+      "%Y%m%d %H:%M"
     ),
     tz = tz
   )
-  as.POSIXct(parsed, tz = tz)
 }
 
 filter_target_year <- function(data, time_col = "Time") {
@@ -105,7 +156,7 @@ read_consumption_year <- function(path, source_name) {
   data_raw |>
     transmute(
       Time = floor_date(parse_timestamp_ch(Timestamp), unit = "15 minutes"),
-      Value_kWh = as.numeric(Volume),
+      Value_kWh = to_number(Volume),
       Source = source_name
     ) |>
     filter(!is.na(Time)) |>
@@ -121,7 +172,7 @@ read_current_pv_year <- function(path) {
   data_raw |>
     transmute(
       Time = floor_date(parse_timestamp_ch(Time), unit = "15 minutes"),
-      Production_kWh = as.numeric(Production_kWh),
+      Production_kWh = to_number(Production_kWh),
       Source = "current_pv"
     ) |>
     filter(!is.na(Time)) |>
@@ -153,11 +204,29 @@ read_pv_simulation_file <- function(path) {
 parse_pv_simulation_time <- function(date_value, time_value) {
   datetime_text <- paste(date_value, target_year, time_value)
   if (pv_simulation_date_order == "dm") {
-    parsed <- parse_date_time(datetime_text, orders = c("dm Y I:M p", "dm Y H:M", "dm Y HMS", "dm Y HM"), tz = tz_local)
+    formats <- c(
+      "%d.%m. %Y %H:%M:%S",
+      "%d.%m. %Y %H:%M",
+      "%d.%m %Y %H:%M:%S",
+      "%d.%m %Y %H:%M",
+      "%d/%m %Y %H:%M:%S",
+      "%d/%m %Y %H:%M",
+      "%d-%m %Y %H:%M:%S",
+      "%d-%m %Y %H:%M",
+      "%d.%m. %Y %I:%M %p",
+      "%d.%m %Y %I:%M %p",
+      "%d/%m %Y %I:%M %p"
+    )
   } else {
-    parsed <- parse_date_time(datetime_text, orders = c("md Y I:M p", "md Y H:M", "md Y HMS", "md Y HM"), tz = tz_local)
+    formats <- c(
+      "%m/%d %Y %H:%M:%S",
+      "%m/%d %Y %H:%M",
+      "%m-%d %Y %H:%M:%S",
+      "%m-%d %Y %H:%M",
+      "%m/%d %Y %I:%M %p"
+    )
   }
-  as.POSIXct(parsed, tz = tz_local)
+  parse_fixed_datetime(datetime_text, formats = formats, tz = tz_local)
 }
 
 read_polysun_year <- function(path) {
@@ -180,7 +249,7 @@ read_polysun_year <- function(path) {
   data_raw |>
     transmute(
       Time = floor_date(parse_pv_simulation_time(Date, Time), unit = "15 minutes"),
-      Production_kWh = as.numeric(.data[[selected_yield_col]]),
+      Production_kWh = to_number(.data[[selected_yield_col]]),
       Source = basename(path)
     ) |>
     filter(!is.na(Time)) |>
